@@ -9,10 +9,12 @@
 */
 
 // IO
-use std::path::PathBuf;
+use std::fs::File;
+use std::{os::windows::thread, path::PathBuf};
 
 use clap::{Parser};
 
+use reqwest::header::HOST;
 // use std::time::Duration;
 use smol::{prelude::*, Async};
 
@@ -22,6 +24,12 @@ use log::{info, warn};
 
 // Networking 
 use std::net::{TcpStream, ToSocketAddrs};
+
+use std::result::Result::Ok;
+use std::thread::JoinHandle;
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -35,6 +43,9 @@ pub struct Args {
     #[arg(short = 'w', long = "wordlist", default_value = "./combined_words.txt",  help = "Path to the wordlist")]
     wordlist_path: PathBuf,
 
+    #[arg(short = 't', long = "threads", default_value = "10",  help = "Number of worker threads")]
+    thread_count: usize,
+
     #[arg(short = 'v', long = "verbose", help = "Verbose output")]
     verbose: bool,
 }
@@ -44,66 +55,136 @@ fn main() -> Result<()> {
     
     // Parse runtime arguments
     let args = Args::parse();
-    let host = args.host.trim_end_matches('/').to_string();
+    let host: &str = args.host.trim_end_matches('/');
     let port = args.port;
     let wordlist_path = args.wordlist_path;
+    let thread_count = args.thread_count;
+    let verbose = args.verbose;
 
-    smol::block_on(async_main(wordlist_path, host, port))
+    // Open passed wordlist file
+    println!("[+] Processing the wordlist");
+    // Open the path in read-only mode, returns `io::Result<File>`
+    let wordlist_file = match File::open(&wordlist_path) {
+        Err(why) => panic!("couldn't open {}: {}", wordlist_path.display(), why),
+        Ok(file) => file,
+    };
+
+    // get the size of the input wordlist
+    let file_size = wordlist_path.metadata().unwrap().len();
+    println!("File size: {file_size}");
+
+    enumerate_web_directories(wordlist_file, file_size, host, port, thread_count, verbose);    // Multithreaded function
+
+    Ok(())
+    //smol::block_on(async_main(wordlist_path, host, port))
 }
 
-async fn async_main(wordlist_path: PathBuf, host: String, port: u16) -> Result<()> {
+// Plz look at thread pool implementation from ripsaw
+fn enumerate_web_directories(wordlist_file: File, file_size:u64, host: &str, port: u16, thread_count: usize, verbose: bool) -> Result<()> {
 
-    // Check to make sure the wordlist exists
-    if !wordlist_path.exists() {
-        panic!("Wordlist not found at: {}", wordlist_path.display());
-    }
+    let partition_size = file_size / thread_count as u64; // Get the  size of each thread partition
 
-    // Load the wordlist into working memory (String)
-    println!("[+] Loading wordlist into memory");
-    let string_wordlist = std::fs::read_to_string(&wordlist_path)
-        .with_context(|| format!("Cannot read file: `{}`", wordlist_path.display()))?;
+    println!("File size: {file_size}");
+    println!("Partition size per thread: {partition_size}");
+    println!("[+] Building threads...");
 
-    // Convert the String to a Vector of Strings
-    let paths: Vec<String> = string_wordlist
-        .lines()
-        .map(|line| line.trim().to_string())
-        .filter(|line| !line.is_empty())
-        .collect();
+    let mutex_wordlist_file = Arc::new(Mutex::new(wordlist_file)); // Wrap the Mutex in Arc for mutual excusion of the file and an atomic reference across threads
 
-    println!("[+] Fuzzing {} paths", paths.len());
+    let mut handles: Vec<JoinHandle<()>> = vec![]; // A vector of thread handles
 
-
-    for path in paths {
+    for thread_id in 0..thread_count {
+        let wordlist_file = Arc::clone(&mutex_wordlist_file);   // Create a clone of the mutex_worldist_file: Arc<Mutex><File>> for each thread
+        let host = String::from(host);
         
-        // Create a connection stream to the base url
-        let host_addr = host.clone();
-        let mut addrs = smol::unblock(move || (host_addr, port).to_socket_addrs()).await?;
-        let addr = addrs.next().unwrap();
-        let mut stream = Async::<TcpStream>::connect(addr).await?;
+        let handle = std::thread::spawn(move || {
+            // Calculate current thread's assigned memory space (assigned partition)
+            let start = thread_id as u64 * partition_size; 
 
-        // Format the request
-        let request_string = format!("GET /{} HTTP/1.1\r\nHost: {}:{}\r\nConnection: keep-alive\r\n\r\n", path, host, port);
+            // If the current thread is the first thread, start at the beginning of the file
+            let end = if thread_id == thread_count - 1 {
+                                file_size
+                            } else {
+                                (thread_id as u64 + 1) * partition_size
+                            };
 
-        // Send an HTTP GET request.
-        stream.write_all(request_string.as_bytes()).await?;
+            // Request and lock the file
+            if verbose { println!("[+] Thread {thread_id} is now reading from wordlist"); }
+            let mut wordlist_file = wordlist_file.lock().unwrap();
 
-        // Read the response
-        let mut bytes_buffer = vec![0; 1024];
-        stream.read(&mut bytes_buffer).await?;
+            // Count how many lines are in this current partition
+            let line_count:usize = match count_lines_in_partition(&mut wordlist_file, start, end) {
+                Err(why) => panic!("Error counting lines on thread {} because {}", thread_id, why),
+                Ok(line_count) => line_count,
+            };
 
-        let status_code = read_status_code(bytes_buffer).await?;
-        
-        match status_code[0]{
-            50 => println!("{host}/{path}  -----------------------------  Status code: {:?} \n", status_code),     // 2xx
-            51 => println!("{host}/{path}  -----------------------------  Status code: {:?} \n", status_code),     // 3xx
-            // 52 => println!("{host}/{path}  -----------------------------  Status code: {:?} \n", status_code),     // 4xx
-            _  => ()
-        }
+            let mut lines:Vec<String> = Vec::with_capacity(line_count);  // Allocate a vector of that size (more efficient to pre-allocate and not allocate each entry)
+            
+            // Read lines of partition into the vector
+            wordlist_file.seek(SeekFrom::Start(start)).expect("Failed to seek to partition start.");    // Move the position of the file read
+
+            let mut buf_reader = BufReader::new(&*wordlist_file); // Create a reading buffer to the file pointer
+
+
+            let mut current_position = start;
+            while current_position < end {
+                let mut line = String::new();
+                let bytes_read = buf_reader.read_line(&mut line).expect("Failed to read line");
+
+                if bytes_read == 0 {
+                    break;
+                }
+
+                lines.push(line.trim().to_string());
+
+                current_position += bytes_read as u64;
+
+                if current_position >= end {
+                    break;
+                }
+            }
+
+            if verbose { println!("[+] Thread {thread_id} finished reading {} lines.", lines.len()); }
+
+            // Unlock the file and iterate over vector
+            drop(wordlist_file); // Drop is now the owner and its scope has ended. So is this not neccessary and the lock is freed after the seek and read?
+
+            println!("[+] Starting to request on thread {thread_id}");
+            
+
+            
+            // Make a request for each directory in the word list
+            for directory in lines.iter() {
+                // need async stuff for this I think
+                web_request(&host, directory, port);
+            }
+
+        }); // End of thread
+
+        handles.push(handle);   // Push the handles out of the for loop context so they may be joined
     }
 
     Ok(())
 }
 
+async fn web_request(host: &str, directory: &String, port: u16) -> Result<()> {
+    // Create a connection stream to the base url
+    let host_addr = String::from(host);
+    let mut addrs = smol::unblock(move || (host_addr, port).to_socket_addrs()).await?;
+    let addr = addrs.next().unwrap();
+    let mut stream = Async::<TcpStream>::connect(addr).await?;
+
+    // Format the request
+    let request_string = format!("GET /{} HTTP/1.1\r\nHost: {}:{}\r\nConnection: keep-alive\r\n\r\n", directory, host, port);
+
+    // Send an HTTP GET request.
+    stream.write_all(request_string.as_bytes()).await?;
+
+    // Read the response
+    let mut bytes_buffer = vec![0; 1024];
+    stream.read(&mut bytes_buffer).await?;
+    
+    Ok(())
+}
 
 fn initialize() {
     env_logger::init();
@@ -125,7 +206,7 @@ fn initialize() {
 }
 
 
-async fn read_status_code(bytes_buffer: Vec<u8>) -> Result<[u8; 3]> { 
+fn read_status_code(bytes_buffer: Vec<u8>) -> Result<[u8; 3]> { 
 
     // println!("[+] READ_STATUS_CODE ENTRY");
 
@@ -171,3 +252,78 @@ async fn read_status_code(bytes_buffer: Vec<u8>) -> Result<[u8; 3]> {
 
     Ok(status_code)
 }
+
+
+use std::io::{self, BufReader, Seek, SeekFrom, BufRead};
+/// Count how many lines are in the portion of the file that was partitioned to each thread
+// Refactored function to increase readability of the large wordlist crack function
+fn count_lines_in_partition(file: &mut File, start: u64, end: u64) -> io::Result<usize> {
+    file.seek(SeekFrom::Start(start))?;
+    let mut buf_reader = BufReader::new(file);
+    let mut line_count:usize = 0;
+    let mut current_position = start;
+
+    while current_position < end {
+        let mut line = String::new();
+        let bytes_read = buf_reader.read_line(&mut line)?;
+        if bytes_read == 0 {
+            break; // EOF reached
+        }
+        line_count += 1;
+        current_position += bytes_read as u64;
+        if current_position >= end {
+            break;
+        }
+    }
+    Ok(line_count)
+} // end count_lines_in_partition
+
+
+
+// async fn async_main(wordlist_path: PathBuf, host: String, port: u16) -> Result<()> {
+
+//     // Load the wordlist into working memory (String)
+//     println!("[+] Loading wordlist into memory");
+//     let string_wordlist = std::fs::read_to_string(&wordlist_path)
+//         .with_context(|| format!("Cannot read file: `{}`", wordlist_path.display()))?;
+
+//     // Convert the String to a Vector of Strings
+//     let paths: Vec<String> = string_wordlist
+//         .lines()
+//         .map(|line| line.trim().to_string())
+//         .filter(|line| !line.is_empty())
+//         .collect();
+
+//     println!("[+] Fuzzing {} paths", paths.len());
+
+
+//     for path in paths {
+        
+//         // Create a connection stream to the base url
+//         let host_addr = host.clone();
+//         let mut addrs = smol::unblock(move || (host_addr, port).to_socket_addrs()).await?;
+//         let addr = addrs.next().unwrap();
+//         let mut stream = Async::<TcpStream>::connect(addr).await?;
+
+//         // Format the request
+//         let request_string = format!("GET /{} HTTP/1.1\r\nHost: {}:{}\r\nConnection: keep-alive\r\n\r\n", path, host, port);
+
+//         // Send an HTTP GET request.
+//         stream.write_all(request_string.as_bytes()).await?;
+
+//         // Read the response
+//         let mut bytes_buffer = vec![0; 1024];
+//         stream.read(&mut bytes_buffer).await?;
+
+//         let status_code = read_status_code(bytes_buffer).await?;
+        
+//         match status_code[0]{
+//             50 => println!("{host}/{path}  -----------------------------  Status code: {:?} \n", status_code),     // 2xx
+//             51 => println!("{host}/{path}  -----------------------------  Status code: {:?} \n", status_code),     // 3xx
+//             // 52 => println!("{host}/{path}  -----------------------------  Status code: {:?} \n", status_code),     // 4xx
+//             _  => ()
+//         }
+//     }
+
+//     Ok(())
+// }
