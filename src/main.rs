@@ -8,19 +8,32 @@
 *
 */
 
+/* TODO:
+
+    - Rate Limiting Detection: Calculate average reqeust time, over time. Inform user of detection; research options to work around this
+    - Progess bar
+    - Option to output to file (create if non-existent)
+    - Option for custom request string (?)
+
+*/
+
+
 // IO
 use std::fs::File;
+#[cfg(windows)]
 use std::{os::windows::thread, path::PathBuf};
-
+use std::path::PathBuf;
 use clap::{Parser};
 
-use reqwest::header::HOST;
+// use reqwest::header::HOST;
 // use std::time::Duration;
 use smol::{prelude::*, Async};
 
 // CLI
 use anyhow::{Result, Context};
 use log::{info, warn};
+use indicatif::ProgressBar;
+use std::time::Duration;
 
 // Networking 
 use std::net::{TcpStream, ToSocketAddrs};
@@ -28,7 +41,7 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::result::Result::Ok;
 use std::thread::JoinHandle;
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicBool, Ordering};
+// use std::sync::atomic::{AtomicBool, Ordering};
 
 
 #[derive(Parser, Debug)]
@@ -61,6 +74,8 @@ fn main() -> Result<()> {
     let thread_count = args.thread_count;
     let verbose = args.verbose;
 
+    println!("Target: {host}:{port}");
+
     // Open passed wordlist file
     println!("[+] Processing the wordlist");
     // Open the path in read-only mode, returns `io::Result<File>`
@@ -69,14 +84,15 @@ fn main() -> Result<()> {
         Ok(file) => file,
     };
 
-    // get the size of the input wordlist
+    // Get the size of the input wordlist
     let file_size = wordlist_path.metadata().unwrap().len();
     println!("File size: {file_size}");
 
-    enumerate_web_directories(wordlist_file, file_size, host, port, thread_count, verbose);    // Multithreaded function
+    //let bar = ProgressBar::new(file_size);
+
+    enumerate_web_directories(wordlist_file, file_size, host, port, thread_count, verbose)?;    // Multithreaded function
 
     Ok(())
-    //smol::block_on(async_main(wordlist_path, host, port))
 }
 
 // Plz look at thread pool implementation from ripsaw
@@ -84,9 +100,10 @@ fn enumerate_web_directories(wordlist_file: File, file_size:u64, host: &str, por
 
     let partition_size = file_size / thread_count as u64; // Get the  size of each thread partition
 
-    println!("File size: {file_size}");
-    println!("Partition size per thread: {partition_size}");
-    println!("[+] Building threads...");
+    if verbose {
+        println!("Partition size per thread: {partition_size}");
+        println!("[+] Building threads...");
+    }
 
     let mutex_wordlist_file = Arc::new(Mutex::new(wordlist_file)); // Wrap the Mutex in Arc for mutual excusion of the file and an atomic reference across threads
 
@@ -97,10 +114,14 @@ fn enumerate_web_directories(wordlist_file: File, file_size:u64, host: &str, por
         let host = String::from(host);
         
         let handle = std::thread::spawn(move || {
+
+            let bar = ProgressBar::new_spinner();
+            bar.enable_steady_tick(Duration::from_millis(100));
+
             // Calculate current thread's assigned memory space (assigned partition)
             let start = thread_id as u64 * partition_size; 
 
-            // If the current thread is the first thread, start at the beginning of the file
+            // If the current thread is the last thread, set the end to the true end of the file, not the calculated end
             let end = if thread_id == thread_count - 1 {
                                 file_size
                             } else {
@@ -148,14 +169,15 @@ fn enumerate_web_directories(wordlist_file: File, file_size:u64, host: &str, por
             // Unlock the file and iterate over vector
             drop(wordlist_file); // Drop is now the owner and its scope has ended. So is this not neccessary and the lock is freed after the seek and read?
 
-            println!("[+] Starting to request on thread {thread_id}");
-            
-
+            if verbose { println!("[+] Starting to request on thread {thread_id}"); }
             
             // Make a request for each directory in the word list
             for directory in lines.iter() {
                 // need async stuff for this I think
-                web_request(&host, directory, port);
+                match smol::block_on(web_request(&host, directory, port)) {
+                    Err(why) => panic!("Request failed: {}", why),
+                    Ok(_) => (),
+                };
             }
 
         }); // End of thread
@@ -163,6 +185,10 @@ fn enumerate_web_directories(wordlist_file: File, file_size:u64, host: &str, por
         handles.push(handle);   // Push the handles out of the for loop context so they may be joined
     }
 
+    for handle in handles {
+        handle.join().expect("Thread panicked ")
+    }
+    
     Ok(())
 }
 
@@ -182,29 +208,19 @@ async fn web_request(host: &str, directory: &String, port: u16) -> Result<()> {
     // Read the response
     let mut bytes_buffer = vec![0; 1024];
     stream.read(&mut bytes_buffer).await?;
+
+    let status_code = read_status_code(bytes_buffer)?;
     
+    match status_code[0]{
+        2 => println!("{host}/{directory}  -----------------------------  Status code: 2{}{} \n", status_code[1], status_code[2]),  // 2xx
+        3 => if status_code[2] == 1 { // Ignore permanently moved links [301]
+                } else { println!("{host}/{directory}  -----------------------------  Status code: 3{}{} \n", status_code[1], status_code[2])},  // 3xx
+        // 52 => println!("{host}/{path}  -----------------------------  Status code: {:?} \n", status_code),     // 4xx
+        _  => ()
+    }
+
     Ok(())
 }
-
-fn initialize() {
-    env_logger::init();
-    info!("Starting log...");
-    warn!("Ayeee a warning!");
-
-    let banner = r#"
-        ooooooooo.                 .   oooo        oooooooooooo  o8o                    .o8                    
-        `888   `Y88.             .o8   `888        `888'     `8  `"'                   "888                    
-        888   .d88'  .oooo.   .o888oo  888 .oo.    888         oooo  ooo. .oo.    .oooo888   .ooooo.  oooo d8b
-        888ooo88P'  `P  )88b    888    888P"Y88b   888oooo8    `888  `888P"Y88b  d88' `888  d88' `88b `888""8P
-        888          .oP"888    888    888   888   888    "     888   888   888  888   888  888ooo888  888    
-        888         d8(  888    888 .  888   888   888          888   888   888  888   888  888    .o  888    
-        o888o        `Y888""8o   "888" o888o o888o o888o        o888o o888o o888o `Y8bod88P" `Y8bod8P' d888b  
-
-    "#;
-
-    println!("{banner}");
-}
-
 
 fn read_status_code(bytes_buffer: Vec<u8>) -> Result<[u8; 3]> { 
 
@@ -242,7 +258,7 @@ fn read_status_code(bytes_buffer: Vec<u8>) -> Result<[u8; 3]> {
     loop {
         // println!("status_code value  = {} ... status index = {}", status_code[status_index], status_index);
         // println!("bytes_buffer value = {} ... buffer index = {}", bytes_buffer[buffer_index], buffer_index);
-        status_code[status_index] = bytes_buffer[buffer_index];
+        status_code[status_index] = bytes_buffer[buffer_index] - 48;    // Subtract 48 to get ascii value
         status_index += 1;    buffer_index += 1;
         
         if status_index >= 3 {
@@ -250,7 +266,28 @@ fn read_status_code(bytes_buffer: Vec<u8>) -> Result<[u8; 3]> {
         }
     }
 
+
     Ok(status_code)
+}
+
+
+fn initialize() {
+    env_logger::init();
+    info!("Starting log...");
+    warn!("Ayeee a warning!");
+
+    let banner = r#"
+        ooooooooo.                 .   oooo        oooooooooooo  o8o                    .o8                    
+        `888   `Y88.             .o8   `888        `888'     `8  `"'                   "888                    
+        888   .d88'  .oooo.   .o888oo  888 .oo.    888         oooo  ooo. .oo.    .oooo888   .ooooo.  oooo d8b
+        888ooo88P'  `P  )88b    888    888P"Y88b   888oooo8    `888  `888P"Y88b  d88' `888  d88' `88b `888""8P
+        888          .oP"888    888    888   888   888    "     888   888   888  888   888  888ooo888  888    
+        888         d8(  888    888 .  888   888   888          888   888   888  888   888  888    .o  888    
+        o888o        `Y888""8o   "888" o888o o888o o888o        o888o o888o o888o `Y8bod88P" `Y8bod8P' d888b  
+
+    "#;
+
+    println!("{banner}");
 }
 
 
@@ -294,8 +331,7 @@ fn count_lines_in_partition(file: &mut File, start: u64, end: u64) -> io::Result
 //         .filter(|line| !line.is_empty())
 //         .collect();
 
-//     println!("[+] Fuzzing {} paths", paths.len());
-
+//     println!("[+] Fuzzing {} paths", paths.len());c
 
 //     for path in paths {
         
