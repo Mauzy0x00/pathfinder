@@ -22,7 +22,10 @@
 use std::fs::File;
 #[cfg(windows)]
 use std::{os::windows::thread, path::PathBuf};
+
+#[cfg(target_os="linux")]
 use std::path::PathBuf;
+
 use clap::{Parser};
 
 // use reqwest::header::HOST;
@@ -83,20 +86,29 @@ fn main() -> Result<()> {
         Err(why) => panic!("couldn't open {}: {}", wordlist_path.display(), why),
         Ok(file) => file,
     };
-
     // Get the size of the input wordlist
     let file_size = wordlist_path.metadata().unwrap().len();
     println!("File size: {file_size}");
 
-    //let bar = ProgressBar::new(file_size);
 
-    enumerate_web_directories(wordlist_file, file_size, host, port, thread_count, verbose)?;    // Multithreaded function
+    // Probably a better way to do this... proof of concept atm
+    let file = File::open("combined_words.txt")?;
+    let reader = BufReader::new(file);
+    let mut count = 0;
+
+    for _ in reader.lines() {
+        count += 1;
+    }
+    let progress_bar = ProgressBar::new(count);
+
+    enumerate_web_directories(wordlist_file, file_size, host, port, thread_count, progress_bar, verbose)?;    // Multithreaded function
 
     Ok(())
 }
 
+
 // Plz look at thread pool implementation from ripsaw
-fn enumerate_web_directories(wordlist_file: File, file_size:u64, host: &str, port: u16, thread_count: usize, verbose: bool) -> Result<()> {
+fn enumerate_web_directories(wordlist_file: File, file_size:u64, host: &str, port: u16, thread_count: usize, progress_bar: ProgressBar ,verbose: bool) -> Result<()> {
 
     let partition_size = file_size / thread_count as u64; // Get the  size of each thread partition
 
@@ -112,11 +124,9 @@ fn enumerate_web_directories(wordlist_file: File, file_size:u64, host: &str, por
     for thread_id in 0..thread_count {
         let wordlist_file = Arc::clone(&mutex_wordlist_file);   // Create a clone of the mutex_worldist_file: Arc<Mutex><File>> for each thread
         let host = String::from(host);
-        
-        let handle = std::thread::spawn(move || {
+        let progress_bar= progress_bar.clone();
 
-            let bar = ProgressBar::new_spinner();
-            bar.enable_steady_tick(Duration::from_millis(100));
+        let handle = std::thread::spawn(move || {
 
             // Calculate current thread's assigned memory space (assigned partition)
             let start = thread_id as u64 * partition_size; 
@@ -178,6 +188,8 @@ fn enumerate_web_directories(wordlist_file: File, file_size:u64, host: &str, por
                     Err(why) => panic!("Request failed: {}", why),
                     Ok(_) => (),
                 };
+
+                progress_bar.inc(1);
             }
 
         }); // End of thread
@@ -191,6 +203,7 @@ fn enumerate_web_directories(wordlist_file: File, file_size:u64, host: &str, por
     
     Ok(())
 }
+
 
 async fn web_request(host: &str, directory: &String, port: u16) -> Result<()> {
     // Create a connection stream to the base url
