@@ -9,7 +9,7 @@
 */
 
 /* TODO:
-
+    - Fix port formatting in the request string (currently hard coded to 80)
     - Rate Limiting Detection: Calculate average reqeust time, over time. Inform user of detection; research options to work around this
     - sub-domain enumeration
     - Crawling: If a directory is found, add it to the queue of directories to fuzz (ex. if /admin is found, add /admin/ to the queue)
@@ -45,54 +45,55 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 // use std::sync::atomic::{AtomicBool, Ordering};
 
-#[derive(Parser, Debug)]
-#[command(version, about, long_about = None)]
-pub struct Args {
-    #[arg(
-        short = 'u',
-        long = "url",
-        help = "Target URL (ex. '-u mauzy.net' or '-u 10.10.192.251"
-    )]
-    host: String,
-
-    #[arg(
-        short = 'p', 
-        long = "port", 
-        default_value = "80", 
-        help = "Target port")]
-    port: u16,
-
-    #[arg(
-        short = 'w',
-        long = "wordlist",
-        default_value = "./combined_words.txt",
-        help = "Path to the wordlist"
-    )]
-    wordlist_path: PathBuf,
-
-    #[arg(
-        short = 't',
-        long = "threads",
-        default_value = "50",
-        help = "Number of worker threads"
-    )]
-    thread_count: usize,
-
-    #[arg(short = 'v', long = "verbose", help = "Verbose output")]
-    verbose: bool,
-}
+mod arg_parser;
+use arg_parser::{Args, Commands};
 
 fn main() -> Result<()> {
     initialize();
 
     // Parse runtime arguments
     let args = Args::parse();
-    let host: &str = args.host.trim_end_matches('/');
-    let port = args.port;
-    let wordlist_path = args.wordlist_path;
-    let thread_count = args.thread_count;
-    let verbose = args.verbose;
 
+    match args.command {
+        Some(Commands::DirectoryScan {
+            host,
+            port,
+            wordlist_path,
+            thread_count,
+            output_file,
+            verbose,
+        }) => {
+            directory_enumeration(
+                &host,
+                port,
+                wordlist_path,
+                thread_count,
+                output_file,
+                verbose,
+            )?; // Multithreaded function
+        }
+
+        Some(Commands::SubdomainScan { .. }) => {
+            println!("Subdomain scan not implemented yet");
+        }
+
+        None => {
+            println!("No command provided. Use --help for more information.");
+        }
+    }
+
+    Ok(())
+}
+
+// Plz look at thread pool implementation from ripsaw
+fn directory_enumeration(
+    host: &str,
+    port: u16,
+    wordlist_path: PathBuf,
+    thread_count: usize,
+    output_file: Option<PathBuf>,
+    verbose: bool,
+) -> Result<()> {
     println!("Target: {host}:{port}");
 
     // Open passed wordlist file
@@ -115,29 +116,6 @@ fn main() -> Result<()> {
         wordlist_line_count += 1;
     }
 
-    enumerate_web_directories(
-        wordlist_file,
-        file_size,
-        host,
-        port,
-        thread_count,
-        wordlist_line_count,
-        verbose,
-    )?; // Multithreaded function
-
-    Ok(())
-}
-
-// Plz look at thread pool implementation from ripsaw
-fn enumerate_web_directories(
-    wordlist_file: File,
-    file_size: u64,
-    host: &str,
-    port: u16,
-    thread_count: usize,
-    wordlist_line_count: usize,
-    verbose: bool,
-) -> Result<()> {
     let partition_size = file_size / thread_count as u64; // Get the  size of each thread partition
 
     if verbose {
@@ -396,50 +374,3 @@ fn count_lines_in_partition(file: &mut File, start: u64, end: u64) -> io::Result
     }
     Ok(line_count)
 } // end count_lines_in_partition
-
-// async fn async_main(wordlist_path: PathBuf, host: String, port: u16) -> Result<()> {
-
-//     // Load the wordlist into working memory (String)
-//     println!("[+] Loading wordlist into memory");
-//     let string_wordlist = std::fs::read_to_string(&wordlist_path)
-//         .with_context(|| format!("Cannot read file: `{}`", wordlist_path.display()))?;
-
-//     // Convert the String to a Vector of Strings
-//     let paths: Vec<String> = string_wordlist
-//         .lines()
-//         .map(|line| line.trim().to_string())
-//         .filter(|line| !line.is_empty())
-//         .collect();
-
-//     println!("[+] Fuzzing {} paths", paths.len());c
-
-//     for path in paths {
-
-//         // Create a connection stream to the base url
-//         let host_addr = host.clone();
-//         let mut addrs = smol::unblock(move || (host_addr, port).to_socket_addrs()).await?;
-//         let addr = addrs.next().unwrap();
-//         let mut stream = Async::<TcpStream>::connect(addr).await?;
-
-//         // Format the request
-//         let request_string = format!("GET /{} HTTP/1.1\r\nHost: {}:{}\r\nConnection: keep-alive\r\n\r\n", path, host, port);
-
-//         // Send an HTTP GET request.
-//         stream.write_all(request_string.as_bytes()).await?;
-
-//         // Read the response
-//         let mut bytes_buffer = vec![0; 1024];
-//         stream.read(&mut bytes_buffer).await?;
-
-//         let status_code = read_status_code(bytes_buffer).await?;
-
-//         match status_code[0]{
-//             50 => println!("{host}/{path}  -----------------------------  Status code: {:?} \n", status_code),     // 2xx
-//             51 => println!("{host}/{path}  -----------------------------  Status code: {:?} \n", status_code),     // 3xx
-//             // 52 => println!("{host}/{path}  -----------------------------  Status code: {:?} \n", status_code),     // 4xx
-//             _  => ()
-//         }
-//     }
-
-//     Ok(())
-// }
