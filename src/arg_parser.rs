@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use std::{net::Ipv4Addr, path::PathBuf};
+use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -42,7 +42,7 @@ pub enum Commands {
             long = "output",
             help = "Path to the output file (optional)"
         )]
-        output_file: Option<PathBuf>,
+        output_file: Option<String>,
 
         #[arg(short = 'v', long = "verbose", help = "Verbose output")]
         verbose: bool,

@@ -1,7 +1,7 @@
 /*
 *   Purpose: A learning project to write my own directory enumeration tool.
 *            Note: Using more than 50 concurent threads turns this program instantly into a DoS tool against the target. Use with caution and at your own risk.
-*                   A test with 100 threads broke the OWASP juice shop. 
+*                   A test with 100 threads broke the OWASP juice shop.
 *
 *   Author: Mauzy0x00
 *   Date:   6.18.2025
@@ -19,6 +19,7 @@
 
 // IO
 use std::fs::File;
+
 #[cfg(windows)]
 use std::path::PathBuf;
 
@@ -27,8 +28,6 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
-// use reqwest::header::HOST;
-// use std::time::Duration;
 use smol::{Async, prelude::*};
 
 // CLI
@@ -67,9 +66,9 @@ fn main() -> Result<()> {
                 port,
                 wordlist_path,
                 thread_count,
-                output_file,
+                &output_file,
                 verbose,
-            )?; // Multithreaded function
+            )?;
         }
 
         Some(Commands::SubdomainScan { .. }) => {
@@ -90,7 +89,7 @@ fn directory_enumeration(
     port: u16,
     wordlist_path: PathBuf,
     thread_count: usize,
-    output_file: Option<PathBuf>,
+    _output_string: &Option<String>,
     verbose: bool,
 ) -> Result<()> {
     println!("Target: {host}:{port}");
@@ -237,7 +236,9 @@ fn directory_enumeration(
                                             "{host}/{directory}  -----------------------------  Status code: 3{}{}\n",
                                             status_code[1], status_code[2]
                                         ));
+
                                 }
+                                
                             }
                             _ => {} // Ignore other status codes
                         }
