@@ -1,7 +1,7 @@
 /*
 *   Purpose: A learning project to write my own directory enumeration tool.
-*               Pass a hash value and a word list to crack hashed passwords!
-*               Can also be used to quickly generate hashes of a wordlist (not implemented yet)
+*            Note: Using more than 50 concurent threads turns this program instantly into a DoS tool against the target. Use with caution and at your own risk.
+*                   A test with 100 threads broke the OWASP juice shop. 
 *
 *   Author: Mauzy0x00
 *   Date:   6.18.2025
@@ -15,7 +15,6 @@
     - Crawling: If a directory is found, add it to the queue of directories to fuzz (ex. if /admin is found, add /admin/ to the queue)
     - Option to output to file (create if non-existent)
     - Option for custom request string (?)
-
 */
 
 // IO
