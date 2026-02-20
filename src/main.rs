@@ -119,23 +119,16 @@ fn enumerate(
 ) -> Result<()> {
     // Open passed wordlist file
     println!("[+] Processing the wordlist");
+    
     // Open the path in read-only mode, returns `io::Result<File>`
-    let wordlist_file = match File::open(&wordlist_path) {
-        Err(why) => panic!("couldn't open {}: {}", wordlist_path.display(), why),
-        Ok(file) => file,
-    };
-    // Get the size of the input wordlist
-    let file_size = wordlist_path.metadata().unwrap().len();
+    let wordlist_file = File::open(&wordlist_path)?;
+    let file_size = wordlist_path.metadata()?.len();
     println!("File size: {file_size}");
 
-    // Probably a better way to do this... proof of concept atm
-    let file = File::open("combined_words.txt")?;
-    let reader = BufReader::new(file);
-
-    let mut wordlist_line_count = 0;
-    for _ in reader.lines() {
-        wordlist_line_count += 1;
-    }
+    // Count lines from a separate reader
+    let wordlist_line_count = BufReader::new(File::open(&wordlist_path)?)
+        .lines()
+        .count();
 
     let partition_size = file_size / thread_count as u64; // Get the  size of each thread partition
 
@@ -382,6 +375,31 @@ fn initialize() {
 
     println!("{banner}");
 }
+
+fn process_wordlist(wordlist_path: PathBuf, thread_count: usize) -> Result<u64> {
+        println!("[+] Processing the wordlist");
+    // Open the path in read-only mode, returns `io::Result<File>`
+    let wordlist_file = match File::open(&wordlist_path) {
+        Err(why) => panic!("couldn't open {}: {}", wordlist_path.display(), why),
+        Ok(file) => file,
+    };
+    // Get the size of the input wordlist
+    let file_size = wordlist_path.metadata().unwrap().len();
+    println!("File size: {file_size}");
+
+    // Probably a better way to do this... proof of concept atm
+    let file = File::open("combined_words.txt")?;
+    let reader = BufReader::new(file);
+
+    let mut wordlist_line_count = 0;
+    for _ in reader.lines() {
+        wordlist_line_count += 1;
+    }
+
+    let partition_size = file_size / thread_count as u64; // Get the  size of each thread partition
+
+    Ok(partition_size)
+} 
 
 use std::io::{self, BufRead, BufReader, Seek, SeekFrom};
 /// Count how many lines are in the portion of the file that was partitioned to each thread
