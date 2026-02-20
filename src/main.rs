@@ -9,8 +9,10 @@
 */
 
 /* TODO:
-    - Fix port formatting in the request string -- Omit port 80 and 443 from request string? 
+    - Fix port formatting in the request string -- Omit port 80 and 443 from request string?
+    - Implement output file
     - Refactor code
+    - Verbosity levels ie. (-v -vv -vvv)
     - Rate Limiting Detection: Calculate average reqeust time, over time. Inform user of detection; research options to work around this
     - Crawling: If a directory is found, add it to the queue of directories to fuzz (ex. if /admin is found, add /admin/ to the queue)
     - Option to output to file (create if non-existent)
@@ -46,6 +48,16 @@ use std::thread::JoinHandle;
 mod arg_parser;
 use arg_parser::{Args, Commands};
 
+struct EnumerationConfig {
+    host: String,
+    port: u16,
+    wordlist_path: PathBuf,
+    thread_count: usize,
+    output_file: Option<String>,
+    verbose: bool,
+    is_subdomain: bool,
+}
+
 fn main() -> Result<()> {
     initialize();
 
@@ -62,18 +74,19 @@ fn main() -> Result<()> {
             verbose,
         }) => {
             let is_subdomain = false;
-
             println!("Target: {host}:{port}");
 
-            enumerate(
-                &host,
+            let config = EnumerationConfig {
+                host,
                 port,
-                is_subdomain,
                 wordlist_path,
                 thread_count,
-                &output_file,
+                output_file,
                 verbose,
-            )?;
+                is_subdomain,
+            };
+
+            enumerate(config)?;
         }
 
         Some(Commands::SubdomainScan {
@@ -88,15 +101,17 @@ fn main() -> Result<()> {
 
             println!("Target: {host}:{port}");
 
-            enumerate(
-                &host,
+            let config = EnumerationConfig {
+                host,
                 port,
-                is_subdomain,
                 wordlist_path,
                 thread_count,
-                &output_file,
+                output_file,
                 verbose,
-            )?;
+                is_subdomain,
+            };
+
+            enumerate(config)?;
         }
 
         None => {
@@ -108,31 +123,23 @@ fn main() -> Result<()> {
 }
 
 // Plz look at thread pool implementation from ripsaw
-fn enumerate(
-    host: &str,
-    port: u16,
-    is_subdomain: bool,
-    wordlist_path: PathBuf,
-    thread_count: usize,
-    _output_string: &Option<String>,
-    verbose: bool,
-) -> Result<()> {
+fn enumerate(config: EnumerationConfig) -> Result<()> {
     // Open passed wordlist file
     println!("[+] Processing the wordlist");
-    
+
     // Open the path in read-only mode, returns `io::Result<File>`
-    let wordlist_file = File::open(&wordlist_path)?;
-    let file_size = wordlist_path.metadata()?.len();
+    let wordlist_file = File::open(&config.wordlist_path)?;
+    let file_size = config.wordlist_path.metadata()?.len();
     println!("File size: {file_size}");
 
     // Count lines from a separate reader
-    let wordlist_line_count = BufReader::new(File::open(&wordlist_path)?)
+    let wordlist_line_count = BufReader::new(File::open(&config.wordlist_path)?)
         .lines()
         .count();
 
-    let partition_size = file_size / thread_count as u64; // Get the  size of each thread partition
+    let partition_size = file_size / config.thread_count as u64; // Get the  size of each thread partition
 
-    if verbose {
+    if config.verbose {
         println!("Partition size per thread: {partition_size}");
         println!("[+] Building threads...");
     }
@@ -155,8 +162,8 @@ fn enumerate(
     let mutex_wordlist_file = Arc::new(Mutex::new(wordlist_file)); // Wrap the Mutex in Arc for mutual excusion of the file and an atomic reference across threads
 
     // Start worker threads
-    for thread_id in 0..thread_count {
-        let host = String::from(host);
+    for thread_id in 0..config.thread_count {
+        let host = config.host.clone();
         let wordlist_file = Arc::clone(&mutex_wordlist_file); // Create a clone of the mutex_worldist_file: Arc<Mutex><File>> for each thread
         let progress_bar = progress_bar.clone(); // A clone of the struct contianing progress bars
         let multi_progress = multi_progress.clone(); // A clone of the struct contianing progress bars
@@ -167,14 +174,14 @@ fn enumerate(
                 let start = thread_id as u64 * partition_size;
 
                 // If the current thread is the last thread, set the end to the true end of the file, not the calculated end
-                let end = if thread_id == thread_count - 1 {
+                let end = if thread_id == config.thread_count - 1 {
                     file_size
                 } else {
                     (thread_id as u64 + 1) * partition_size
                 };
 
                 // Request and lock the file
-                if verbose {
+                if config.verbose {
                     println!("[+] Thread {thread_id} is now reading from wordlist");
                 }
 
@@ -219,7 +226,7 @@ fn enumerate(
                     }
                 }
 
-                if verbose {
+                if config.verbose {
                     println!(
                         "[+] Thread {thread_id} finished reading {} lines.",
                         lines.len()
@@ -229,7 +236,7 @@ fn enumerate(
                 // Unlock the file and iterate over vector
                 drop(wordlist_file); // Drop is now the owner and its scope has ended. So is this not neccessary and the lock is freed after the seek and read?
 
-                if verbose {
+                if config.verbose {
                     println!("[+] Starting to request on thread {thread_id}");
                 }
 
@@ -237,22 +244,22 @@ fn enumerate(
                 for target in lines 
                 {   
                     // if we are in subdomain mode, craft a subdomain request. Otherwise craft directory reqeust
-                    let request_string = if is_subdomain {
+                    let request_string = if config.is_subdomain {
                         format!(
                         "GET / HTTP/1.1\r\nHost: {}.{}:{}\r\nConnection: keep-alive\r\n\r\n",
-                        target, host, port
+                        target, host, config.port
                         )
                     } else {
                         format!(
                         "GET /{} HTTP/1.1\r\nHost: {}:{}\r\nConnection: keep-alive\r\n\r\n",
-                        target, host, port
+                        target, host, config.port
                         )
                     };
 
-                    if verbose { println!("Request string: {}", request_string); }
+                    if config.verbose { println!("Request string: {}", request_string); }
                     
                     // Asynchronously make the web request and read the status code
-                    if let Ok(status_code) = smol::block_on(web_request(&host, port, &request_string)) {
+                    if let Ok(status_code) = smol::block_on(web_request(&host, config.port, &request_string)) {
                         match status_code[0] {
                             2 => {
                                 let _ = multi_progress.println(format!(
