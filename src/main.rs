@@ -9,9 +9,9 @@
 */
 
 /* TODO:
-    - Fix port formatting in the request string (currently hard coded to 80)
+    - Fix port formatting in the request string -- Omit port 80 and 443 from request string? 
+    - Refactor code
     - Rate Limiting Detection: Calculate average reqeust time, over time. Inform user of detection; research options to work around this
-    - sub-domain enumeration
     - Crawling: If a directory is found, add it to the queue of directories to fuzz (ex. if /admin is found, add /admin/ to the queue)
     - Option to output to file (create if non-existent)
     - Option for custom request string (?)
@@ -61,9 +61,14 @@ fn main() -> Result<()> {
             output_file,
             verbose,
         }) => {
-            directory_enumeration(
+            let is_subdomain = false;
+
+            println!("Target: {host}:{port}");
+
+            enumerate(
                 &host,
                 port,
+                is_subdomain,
                 wordlist_path,
                 thread_count,
                 &output_file,
@@ -71,8 +76,27 @@ fn main() -> Result<()> {
             )?;
         }
 
-        Some(Commands::SubdomainScan { .. }) => {
-            println!("Subdomain scan not implemented yet");
+        Some(Commands::SubdomainScan {
+            host,
+            port,
+            wordlist_path,
+            thread_count,
+            output_file,
+            verbose,
+        }) => {
+            let is_subdomain = true;
+
+            println!("Target: {host}:{port}");
+
+            enumerate(
+                &host,
+                port,
+                is_subdomain,
+                wordlist_path,
+                thread_count,
+                &output_file,
+                verbose,
+            )?;
         }
 
         None => {
@@ -84,16 +108,15 @@ fn main() -> Result<()> {
 }
 
 // Plz look at thread pool implementation from ripsaw
-fn directory_enumeration(
+fn enumerate(
     host: &str,
     port: u16,
+    is_subdomain: bool,
     wordlist_path: PathBuf,
     thread_count: usize,
     _output_string: &Option<String>,
     verbose: bool,
 ) -> Result<()> {
-    println!("Target: {host}:{port}");
-
     // Open passed wordlist file
     println!("[+] Processing the wordlist");
     // Open the path in read-only mode, returns `io::Result<File>`
@@ -140,11 +163,10 @@ fn directory_enumeration(
 
     // Start worker threads
     for thread_id in 0..thread_count {
-        let wordlist_file = Arc::clone(&mutex_wordlist_file); // Create a clone of the mutex_worldist_file: Arc<Mutex><File>> for each thread
         let host = String::from(host);
+        let wordlist_file = Arc::clone(&mutex_wordlist_file); // Create a clone of the mutex_worldist_file: Arc<Mutex><File>> for each thread
         let progress_bar = progress_bar.clone(); // A clone of the struct contianing progress bars
         let multi_progress = multi_progress.clone(); // A clone of the struct contianing progress bars
-
         let handle = std::thread::Builder::new()
             .name(format!("Enumeration_thread_{}", thread_id))
             .spawn(move || {
@@ -219,13 +241,29 @@ fn directory_enumeration(
                 }
 
                 // Make a request for each directory in the word list
-                for directory in lines.iter() {
+                for target in lines 
+                {   
+                    // if we are in subdomain mode, craft a subdomain request. Otherwise craft directory reqeust
+                    let request_string = if is_subdomain {
+                        format!(
+                        "GET / HTTP/1.1\r\nHost: {}.{}:{}\r\nConnection: keep-alive\r\n\r\n",
+                        target, host, port
+                        )
+                    } else {
+                        format!(
+                        "GET /{} HTTP/1.1\r\nHost: {}:{}\r\nConnection: keep-alive\r\n\r\n",
+                        target, host, port
+                        )
+                    };
+
+                    if verbose { println!("Request string: {}", request_string); }
+                    
                     // Asynchronously make the web request and read the status code
-                    if let Ok(status_code) = smol::block_on(web_request(&host, directory, port)) {
+                    if let Ok(status_code) = smol::block_on(web_request(&host, port, &request_string)) {
                         match status_code[0] {
                             2 => {
                                 let _ = multi_progress.println(format!(
-                                    "{host}/{directory}  -----------------------------  Status code: 2{}{}\n",
+                                    "{host}/{target}  -----------------------------  Status code: 2{}{}\n",
                                         status_code[1], status_code[2]
                                     ));
                             }
@@ -233,7 +271,7 @@ fn directory_enumeration(
                                 if status_code[2] != 1 {
                                     // Ignore permanently moved links [301]
                                     let _ = multi_progress.println(format!(
-                                            "{host}/{directory}  -----------------------------  Status code: 3{}{}\n",
+                                            "{host}/{target}  -----------------------------  Status code: 3{}{}\n",
                                             status_code[1], status_code[2]
                                         ));
 
@@ -261,18 +299,12 @@ fn directory_enumeration(
 }
 
 /// Attempts to make a web request and returns 3 bytes representing the status code (ex. [2, 0, 0] for 200)
-async fn web_request(host: &str, directory: &String, port: u16) -> Result<[u8; 3]> {
+async fn web_request(host: &str, port: u16, request_string: &String) -> Result<[u8; 3]> {
     // Create a connection stream to the base url
     let host_addr = String::from(host);
     let mut addrs = smol::unblock(move || (host_addr, port).to_socket_addrs()).await?;
     let addr = addrs.next().unwrap();
     let mut stream = Async::<TcpStream>::connect(addr).await?;
-
-    // Format the request
-    let request_string = format!(
-        "GET /{} HTTP/1.1\r\nHost: {}:{}\r\nConnection: keep-alive\r\n\r\n",
-        directory, host, port
-    );
 
     // Send an HTTP GET request.
     stream.write_all(request_string.as_bytes()).await?;

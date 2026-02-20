@@ -69,6 +69,13 @@ pub enum Commands {
         wordlist_path: PathBuf,
 
         #[arg(
+            short = 'o',
+            long = "output",
+            help = "Path to the output file (optional)"
+        )]
+        output_file: Option<String>,
+
+        #[arg(
             short = 't',
             long = "threads",
             default_value = "50",
