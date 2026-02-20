@@ -42,7 +42,7 @@ pub enum Commands {
             long = "output",
             help = "Path to the output file (optional)"
         )]
-        output_file: Option<String>,
+        output_path: Option<PathBuf>,
 
         #[arg(short = 'v', long = "verbose", help = "Verbose output")]
         verbose: bool,
@@ -73,7 +73,7 @@ pub enum Commands {
             long = "output",
             help = "Path to the output file (optional)"
         )]
-        output_file: Option<String>,
+        output_path: Option<PathBuf>,
 
         #[arg(
             short = 't',

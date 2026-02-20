@@ -20,13 +20,14 @@
 */
 
 // IO
-use std::fs::File;
+use std::fs::{File, OpenOptions};
+use std::io::{self, Write};
 
 #[cfg(windows)]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[cfg(target_os = "linux")]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::Parser;
 
@@ -53,7 +54,7 @@ struct EnumerationConfig {
     port: u16,
     wordlist_path: PathBuf,
     thread_count: usize,
-    output_file: Option<String>,
+    output_path: Option<PathBuf>,
     verbose: bool,
     is_subdomain: bool,
 }
@@ -70,7 +71,7 @@ fn main() -> Result<()> {
             port,
             wordlist_path,
             thread_count,
-            output_file,
+            output_path,
             verbose,
         }) => {
             let is_subdomain = false;
@@ -81,7 +82,7 @@ fn main() -> Result<()> {
                 port,
                 wordlist_path,
                 thread_count,
-                output_file,
+                output_path,
                 verbose,
                 is_subdomain,
             };
@@ -94,7 +95,7 @@ fn main() -> Result<()> {
             port,
             wordlist_path,
             thread_count,
-            output_file,
+            output_path: output_file,
             verbose,
         }) => {
             let is_subdomain = true;
@@ -106,7 +107,7 @@ fn main() -> Result<()> {
                 port,
                 wordlist_path,
                 thread_count,
-                output_file,
+                output_path: output_file,
                 verbose,
                 is_subdomain,
             };
@@ -123,7 +124,15 @@ fn main() -> Result<()> {
 }
 
 // Plz look at thread pool implementation from ripsaw
-fn enumerate(config: EnumerationConfig) -> Result<()> {
+fn enumerate(config: EnumerationConfig) -> Result<()> 
+{
+
+    let output_file = if let Some(output_path) = &config.output_path {
+        Some(create_or_prompt_file(Path::new(output_path))?)
+    } else {
+        None
+    };
+
     // Open passed wordlist file
     println!("[+] Processing the wordlist");
 
@@ -160,11 +169,13 @@ fn enumerate(config: EnumerationConfig) -> Result<()> {
     // Prepare for multithreading
     let mut handles: Vec<JoinHandle<()>> = vec![]; // A vector of thread handles
     let mutex_wordlist_file = Arc::new(Mutex::new(wordlist_file)); // Wrap the Mutex in Arc for mutual excusion of the file and an atomic reference across threads
+    let mutex_output_file = Arc::new(Mutex::new(output_file));
 
     // Start worker threads
     for thread_id in 0..config.thread_count {
         let host = config.host.clone();
         let wordlist_file = Arc::clone(&mutex_wordlist_file); // Create a clone of the mutex_worldist_file: Arc<Mutex><File>> for each thread
+        let output_file = Arc::clone(&mutex_output_file);
         let progress_bar = progress_bar.clone(); // A clone of the struct contianing progress bars
         let multi_progress = multi_progress.clone(); // A clone of the struct contianing progress bars
         let handle = std::thread::Builder::new()
@@ -364,6 +375,39 @@ fn read_status_code(bytes_buffer: Vec<u8>) -> Result<[u8; 3]> {
     Ok(status_code)
 }
 
+/// Create an output file. Ask user for appending to an existing file
+fn create_or_prompt_file(path: &Path) -> io::Result<File> {
+    if path.exists() {
+        // File exists, prompt user
+        print!(
+            "[!] File '{}' already exists. Append to it? (y/n): ",
+            path.display()
+        );
+        io::stdout().flush()?; // Flush to ensure prompt appears
+
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+
+        match input.trim().to_lowercase().as_str() {
+            "y" | "yes" => {
+                // Open in append mode
+                OpenOptions::new().append(true).open(path)
+            }
+            "n" | "no" => {
+                println!("Aborting.");
+                std::process::exit(0);
+            }
+            _ => {
+                println!("Invalid input. Aborting.");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        // File doesn't exist, create it
+        File::create(path)
+    }
+}
+
 fn initialize() {
     env_logger::init();
     info!("Starting log...");
@@ -383,7 +427,7 @@ fn initialize() {
     println!("{banner}");
 }
 
-use std::io::{self, BufRead, BufReader, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Seek, SeekFrom};
 /// Count how many lines are in the portion of the file that was partitioned to each thread
 // Refactored function to increase readability of the large wordlist crack function
 fn count_lines_in_partition(file: &mut File, start: u64, end: u64) -> io::Result<usize> {
