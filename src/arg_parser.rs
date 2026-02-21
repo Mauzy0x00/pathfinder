@@ -10,6 +10,7 @@ pub struct Args {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
+    #[command(alias = "dir", alias = "d", alias = "ds")]
     DirectoryScan {
         #[arg(
             short = 'u',
@@ -25,7 +26,8 @@ pub enum Commands {
             short = 'w',
             long = "wordlist",
             default_value = "./combined_words.txt",
-            help = "Path to the wordlist"
+            help = "Path to the wordlist",
+            alias = "word"
         )]
         wordlist_path: PathBuf,
 
@@ -40,7 +42,8 @@ pub enum Commands {
         #[arg(
             short = 'o',
             long = "output",
-            help = "Path to the output file (optional)"
+            help = "Path to the output file (optional)",
+            alias = "out"
         )]
         output_path: Option<PathBuf>,
 
@@ -49,6 +52,7 @@ pub enum Commands {
     },
 
     /// Scan for subdomains
+    #[command(alias = "sub", alias = "s", alias = "ss")]
     SubdomainScan {
         #[arg(
             short = 'u',
@@ -64,14 +68,17 @@ pub enum Commands {
             short = 'w',
             long = "wordlist",
             default_value = "./combined_words.txt",
-            help = "Path to the wordlist"
+            help = "Path to the wordlist",
+            alias = "word"
+
         )]
         wordlist_path: PathBuf,
 
         #[arg(
             short = 'o',
             long = "output",
-            help = "Path to the output file (optional)"
+            help = "Path to the output file (optional)",
+            alias = "out"
         )]
         output_path: Option<PathBuf>,
 
