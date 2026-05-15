@@ -136,7 +136,7 @@ fn enumerate(config: EnumerationConfig) -> Result<()> {
     // Open the path in read-only mode, returns `io::Result<File>`
     let wordlist_file = File::open(&config.wordlist_path)?;
     let file_size = config.wordlist_path.metadata()?.len();
-    println!("File size: {file_size}");
+    println!("File size: {file_size}                               Status Code");
 
     // Count lines from a separate reader
     let wordlist_line_count = BufReader::new(File::open(&config.wordlist_path)?)
@@ -251,31 +251,37 @@ fn enumerate(config: EnumerationConfig) -> Result<()> {
                 }
 
                 // Make a request for each directory in the word list
-                for target in lines
-                {
+                for target in lines {
                     // if we are in subdomain mode, craft a subdomain request. Otherwise craft directory reqeust
                     let request_string = if config.is_subdomain {
                         format!(
-                        "GET / HTTP/1.1\r\nHost: {}.{}:{}\r\nConnection: keep-alive\r\n\r\n",
-                        target, host, config.port
+                            "GET / HTTP/1.1\r\nHost: {}.{}:{}\r\nConnection: keep-alive\r\n\r\n",
+                            target, host, config.port
                         )
                     } else {
                         format!(
-                        "GET {}{} HTTP/1.1\r\nHost: {}:{}\r\nConnection: keep-alive\r\n\r\n",
-                        path.as_deref().unwrap_or("/"), target, host, config.port
+                            "GET {}{} HTTP/1.1\r\nHost: {}:{}\r\nConnection: keep-alive\r\n\r\n",
+                            path.as_deref().unwrap_or("/"),
+                            target,
+                            host,
+                            config.port
                         )
                     };
 
-                    if config.verbose { println!("Request string: {}", request_string); }
+                    if config.verbose {
+                        println!("Request string: {}", request_string);
+                    }
 
                     // Asynchronously make the web request and read the status code
-                    if let Ok(status_code) = smol::block_on(web_request(&host, config.port, &request_string)) {
+                    if let Ok(status_code) =
+                        smol::block_on(web_request(&host, config.port, &request_string))
+                    {
                         match status_code[0] {
                             2 => {
-
                                 let output = format!(
-                                    "{host}/{target}  -----------------------------  Status code: 2{}{}\n",
-                                        status_code[1], status_code[2]);
+                                    "{host}/{target}  -----------------------------   2{}{}\n",
+                                    status_code[1], status_code[2]
+                                );
 
                                 let _ = multi_progress.println(&output);
 
@@ -285,14 +291,14 @@ fn enumerate(config: EnumerationConfig) -> Result<()> {
                                 if status_code[2] != 1 {
                                     // Ignore permanently moved links [301]
                                     let output = format!(
-                                            "{host}/{target}  -----------------------------  Status code: 3{}{}\n",
-                                            status_code[1], status_code[2]);
+                                        "{host}/{target}  -----------------------------   3{}{}\n",
+                                        status_code[1], status_code[2]
+                                    );
 
                                     let _ = multi_progress.println(&output);
 
                                     tx.send(output).unwrap(); // transmitter to main thread
                                 }
-
                             }
                             _ => {} // Ignore other status codes
                         }
