@@ -17,7 +17,7 @@ pub enum Commands {
             long = "url",
             help = "Target URL (ex. '-u mauzy.net' or '-u 10.10.192.251"
         )]
-        host: String,
+        url: String,
 
         #[arg(short = 'p', long = "port", default_value = "80", help = "Target port")]
         port: u16,
@@ -34,7 +34,7 @@ pub enum Commands {
         #[arg(
             short = 't',
             long = "threads",
-            default_value = "50",
+            default_value = "5",
             help = "Number of worker threads"
         )]
         thread_count: usize,
@@ -70,7 +70,6 @@ pub enum Commands {
             default_value = "./combined_words.txt",
             help = "Path to the wordlist",
             alias = "word"
-
         )]
         wordlist_path: PathBuf,
 

@@ -9,8 +9,6 @@
 */
 
 /* TODO:
-    - Fix port formatting in the request string -- Omit port 80 and 443 from request string?
-    - Implement output file
     - Refactor code
     - Verbosity levels ie. (-v -vv -vvv)
     - Rate Limiting Detection: Calculate average reqeust time, over time. Inform user of detection; research options to work around this
@@ -28,10 +26,11 @@ use std::path::{Path, PathBuf};
 
 #[cfg(target_os = "linux")]
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::channel;
 
 use clap::Parser;
 
-use smol::{Async, prelude::*};
+use smol::{Async, fs, prelude::*};
 
 // CLI
 use anyhow::Result;
@@ -51,6 +50,7 @@ use arg_parser::{Args, Commands};
 
 struct EnumerationConfig {
     host: String,
+    path: Option<String>,
     port: u16,
     wordlist_path: PathBuf,
     thread_count: usize,
@@ -67,7 +67,7 @@ fn main() -> Result<()> {
 
     match args.command {
         Some(Commands::DirectoryScan {
-            host,
+            url,
             port,
             wordlist_path,
             thread_count,
@@ -75,10 +75,14 @@ fn main() -> Result<()> {
             verbose,
         }) => {
             let is_subdomain = false;
-            println!("Target: {host}:{port}");
+
+            let (host, path) = parse_url(&url);
+
+            println!("Target: {}:{}{}", host, port, path.as_deref().unwrap_or(""));
 
             let config = EnumerationConfig {
                 host,
+                path,
                 port,
                 wordlist_path,
                 thread_count,
@@ -104,6 +108,7 @@ fn main() -> Result<()> {
 
             let config = EnumerationConfig {
                 host,
+                path: None,
                 port,
                 wordlist_path,
                 thread_count,
@@ -124,15 +129,7 @@ fn main() -> Result<()> {
 }
 
 // Plz look at thread pool implementation from ripsaw
-fn enumerate(config: EnumerationConfig) -> Result<()> 
-{
-
-    let output_file = if let Some(output_path) = &config.output_path {
-        Some(create_or_prompt_file(Path::new(output_path))?)
-    } else {
-        None
-    };
-
+fn enumerate(config: EnumerationConfig) -> Result<()> {
     // Open passed wordlist file
     println!("[+] Processing the wordlist");
 
@@ -169,15 +166,17 @@ fn enumerate(config: EnumerationConfig) -> Result<()>
     // Prepare for multithreading
     let mut handles: Vec<JoinHandle<()>> = vec![]; // A vector of thread handles
     let mutex_wordlist_file = Arc::new(Mutex::new(wordlist_file)); // Wrap the Mutex in Arc for mutual excusion of the file and an atomic reference across threads
-    let mutex_output_file = Arc::new(Mutex::new(output_file));
+    let (tx, rx) = channel(); // transmitter and reciever to pass results to the main thread
 
     // Start worker threads
     for thread_id in 0..config.thread_count {
+        let tx = tx.clone();
         let host = config.host.clone();
+        let path = config.path.clone();
         let wordlist_file = Arc::clone(&mutex_wordlist_file); // Create a clone of the mutex_worldist_file: Arc<Mutex><File>> for each thread
-        let output_file = Arc::clone(&mutex_output_file);
         let progress_bar = progress_bar.clone(); // A clone of the struct contianing progress bars
         let multi_progress = multi_progress.clone(); // A clone of the struct contianing progress bars
+
         let handle = std::thread::Builder::new()
             .name(format!("Enumeration_thread_{}", thread_id))
             .spawn(move || {
@@ -252,8 +251,8 @@ fn enumerate(config: EnumerationConfig) -> Result<()>
                 }
 
                 // Make a request for each directory in the word list
-                for target in lines 
-                {   
+                for target in lines
+                {
                     // if we are in subdomain mode, craft a subdomain request. Otherwise craft directory reqeust
                     let request_string = if config.is_subdomain {
                         format!(
@@ -262,32 +261,38 @@ fn enumerate(config: EnumerationConfig) -> Result<()>
                         )
                     } else {
                         format!(
-                        "GET /{} HTTP/1.1\r\nHost: {}:{}\r\nConnection: keep-alive\r\n\r\n",
-                        target, host, config.port
+                        "GET {}{} HTTP/1.1\r\nHost: {}:{}\r\nConnection: keep-alive\r\n\r\n",
+                        path.as_deref().unwrap_or("/"), target, host, config.port
                         )
                     };
 
                     if config.verbose { println!("Request string: {}", request_string); }
-                    
+
                     // Asynchronously make the web request and read the status code
                     if let Ok(status_code) = smol::block_on(web_request(&host, config.port, &request_string)) {
                         match status_code[0] {
                             2 => {
-                                let _ = multi_progress.println(format!(
+
+                                let output = format!(
                                     "{host}/{target}  -----------------------------  Status code: 2{}{}\n",
-                                        status_code[1], status_code[2]
-                                    ));
+                                        status_code[1], status_code[2]);
+
+                                let _ = multi_progress.println(&output);
+
+                                tx.send(output).unwrap(); // transmitter to main thread
                             }
                             3 => {
                                 if status_code[2] != 1 {
                                     // Ignore permanently moved links [301]
-                                    let _ = multi_progress.println(format!(
+                                    let output = format!(
                                             "{host}/{target}  -----------------------------  Status code: 3{}{}\n",
-                                            status_code[1], status_code[2]
-                                        ));
+                                            status_code[1], status_code[2]);
 
+                                    let _ = multi_progress.println(&output);
+
+                                    tx.send(output).unwrap(); // transmitter to main thread
                                 }
-                                
+
                             }
                             _ => {} // Ignore other status codes
                         }
@@ -304,7 +309,25 @@ fn enumerate(config: EnumerationConfig) -> Result<()>
         handle.join().expect("Thread panicked ")
     }
 
+    drop(tx);
+
     progress_bar.finish_with_message("Enumeration complete");
+
+    let mut output_file = if let Some(output_path) = &config.output_path {
+        Some(create_or_prompt_file(Path::new(output_path))?)
+    } else {
+        None
+    };
+
+    for received in rx {
+        if let Some(file) = &mut output_file {
+            writeln!(file, "{}", received).unwrap();
+        }
+    }
+
+    if let Some(output_path) = &config.output_path {
+        println!("Results written to {:?}", output_path);
+    }
 
     Ok(())
 }
@@ -414,14 +437,10 @@ fn initialize() {
     warn!("Ayeee a warning!");
 
     let banner = r#"
-        ooooooooo.                 .   oooo        oooooooooooo  o8o                    .o8                    
-        `888   `Y88.             .o8   `888        `888'     `8  `"'                   "888                    
-        888   .d88'  .oooo.   .o888oo  888 .oo.    888         oooo  ooo. .oo.    .oooo888   .ooooo.  oooo d8b
-        888ooo88P'  `P  )88b    888    888P"Y88b   888oooo8    `888  `888P"Y88b  d88' `888  d88' `88b `888""8P
-        888          .oP"888    888    888   888   888    "     888   888   888  888   888  888ooo888  888    
-        888         d8(  888    888 .  888   888   888          888   888   888  888   888  888    .o  888    
-        o888o        `Y888""8o   "888" o888o o888o o888o        o888o o888o o888o `Y8bod88P" `Y8bod8P' d888b  
-
+  ,---.     |    |    ,---.o         |          
+  |---',---.|--- |---.|__. .,---.,---|,---.,---.
+  |    ,---||    |   ||    ||   ||   ||---'|    `->
+  `    `---^`---'`   '`    ``   '`---'`---'`   
     "#;
 
     println!("{banner}");
@@ -450,3 +469,25 @@ fn count_lines_in_partition(file: &mut File, start: u64, end: u64) -> io::Result
     }
     Ok(line_count)
 } // end count_lines_in_partition
+
+/// Parse the given URL to remove any leading 'http://' or 'https://' if present.
+/// If there is a path after the host, separate the path to its own variable.
+/// Return a Tuple (host, path)
+fn parse_url(url: &str) -> (String, Option<String>) {
+    let url = if url.starts_with("http://") || url.starts_with("https://") {
+        url.to_string()
+    } else {
+        format!("http://{}", url)
+    };
+
+    // If there is a path after the host, split it
+    let parts: Vec<&str> = url.split('/').collect();
+    let host = parts[2].to_string();
+
+    let path = match parts.get(3) {
+        Some(&"") | None => None,
+        Some(_) => Some(format!("/{}", parts[3..].join("/"))),
+    };
+
+    (host, path)
+}
